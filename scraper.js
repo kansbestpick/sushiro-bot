@@ -17,24 +17,24 @@ const fs = require('fs');
   const page = await context.newPage();
 
   try {
-    console.log("Navigating to target queue page...");
+    console.log("Navigating to queue page...");
     await page.goto('https://sushirolic.web.app/desktop.html', {
       waitUntil: 'networkidle',
       timeout: 60000
     });
 
-    // Wait for initial web app render
-    await page.waitForTimeout(4000);
+    // Wait 5 seconds for web app initialization
+    await page.waitForTimeout(5000);
 
-    console.log("Interactive extraction: clicking store cards for live ticket numbers...");
+    console.log("Extracting live store list & triggering detail clicks...");
 
     const storesData = await page.evaluate(async () => {
       const results = [];
       const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '點選左邊分店'];
 
-      // Find all store card elements on the page
-      const elements = Array.from(document.querySelectorAll('div, li, button, a'));
-      const storeNodes = elements.filter(el => {
+      // Find store card containers
+      const allElements = Array.from(document.querySelectorAll('div, li, button, article'));
+      const storeNodes = allElements.filter(el => {
         const text = el.innerText || '';
         const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
         return lines.some(l => l.includes('店')) && 
@@ -43,7 +43,7 @@ const fs = require('fs');
                el.children.length > 0 && el.children.length < 15;
       });
 
-      // Deduplicate elements by store name
+      // Deduplicate stores by branch name
       const uniqueStores = [];
       const seenNames = new Set();
 
@@ -58,7 +58,17 @@ const fs = require('fs');
         }
       }
 
-      // Loop through each store card, click it, and read the right-side detail panel
+      // Helper: Dispatch full native mouse click
+      function triggerClick(el) {
+        const opts = { bubbles: true, cancelable: true, view: window };
+        el.dispatchEvent(new PointerEvent('pointerdown', opts));
+        el.dispatchEvent(new MouseEvent('mousedown', opts));
+        el.dispatchEvent(new PointerEvent('pointerup', opts));
+        el.dispatchEvent(new MouseEvent('mouseup', opts));
+        el.dispatchEvent(new MouseEvent('click', opts));
+      }
+
+      // Iterate through stores, click card, and parse right-side detail drawer
       for (let i = 0; i < uniqueStores.length; i++) {
         const item = uniqueStores[i];
         const groupMatch = item.text.match(/(\d+)\s*組/);
@@ -71,20 +81,23 @@ const fs = require('fs');
 
         if (groups > 0) {
           try {
-            // Trigger click on store card to open right detail panel
-            item.element.click();
-            await new Promise(r => setTimeout(r, 300)); // wait for detail pane rendering
-
-            // Read the entire text including the newly updated detail panel
-            const bodyText = document.body.innerText || '';
+            // Trigger native mouse event sequence on card
+            triggerClick(item.element);
             
-            // Extract calling numbers from detail panel (matches A045, 263-267, etc.)
-            const ticketMatch = bodyText.match(/(?:現正叫號|叫號|堂食|籌號|叫至)[^\n]*?([A-Za-z]?\s*\d{2,4}(?:\s*[-~至]\s*\d{2,4})?)/i) ||
-                                bodyText.match(/(\b[A-Za-z]?\d{2,4}\s*[-~至]\s*[A-Za-z]?\d{2,4}\b)/) ||
-                                bodyText.match(/(\b[A-Za-z]\s*\d{2,4}\b)/);
+            // Wait 450ms for detail drawer re-render
+            await new Promise(r => setTimeout(r, 450));
+
+            // Query right-side detail drawer or full page body
+            const detailPanel = document.querySelector('[class*="detail"], [class*="right"], [class*="drawer"], [class*="sidebar"]') || document.body;
+            const panelText = detailPanel.innerText || document.body.innerText || '';
+
+            // Extract ticket numbers (e.g. A045, 263-267, G38, 176-177)
+            const ticketMatch = panelText.match(/(?:現正叫號|叫號|堂食|籌號|叫至)[^\n]*?([A-Za-z]?\s*\d{1,4}(?:\s*[-~至]\s*\d{1,4})?)/i) ||
+                                panelText.match(/(\b[A-Za-z]?\d{1,4}\s*[-~至]\s*[A-Za-z]?\d{1,4}\b)/) ||
+                                panelText.match(/(\b[A-Za-z]\s*\d{2,4}\b)/);
 
             if (ticketMatch && ticketMatch[1]) {
-              callingNumber = ticketMatch[1].trim();
+              callingNumber = ticketMatch[1].trim().replace(/\s+/g, '');
             } else {
               callingNumber = '叫號中';
             }
@@ -96,7 +109,7 @@ const fs = require('fs');
         results.push({
           id: i + 1,
           name_tc: item.name,
-          region: 'KLN', // Region mapping handled on Blogger frontend
+          region: 'KLN', // Region auto-mapping is handled on Blogger frontend
           current_number: callingNumber,
           waiting_groups: groups,
           wait_time: waitTime
@@ -114,7 +127,7 @@ const fs = require('fs');
     };
 
     fs.writeFileSync('live_data.json', JSON.stringify(finalPayload, null, 2));
-    console.log("Successfully generated live_data.json with exact calling numbers!");
+    console.log("Successfully generated live_data.json!");
 
   } catch (err) {
     console.error("Scraper Error:", err.message);
