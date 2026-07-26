@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Sushiro Scraper (Including 九龍灣德福店 Fix)...");
+  console.log("Starting Sushiro Scraper (With Auto-Scroll for Full Store List)...");
   
   const browser = await chromium.launch({
     headless: true,
@@ -10,7 +10,7 @@ const fs = require('fs');
   });
   
   const page = await browser.newPage({
-    viewport: { width: 1280, height: 800 }
+    viewport: { width: 1280, height: 1000 }
   });
 
   try {
@@ -18,8 +18,14 @@ const fs = require('fs');
     await page.goto('https://sushirolic.web.app/desktop.html', { waitUntil: 'networkidle', timeout: 60000 });
     await page.waitForTimeout(4000);
 
-    // Exact names/labels to ignore (header titles/buttons)
-    const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '所有分店', '九龍區', '新界區', '港島區'];
+    // 📜 Auto-scroll to force lazy-loaded cards (like 九龍灣德福店) into the DOM
+    await page.evaluate(async () => {
+      window.scrollTo(0, document.body.scrollHeight);
+      await new Promise(r => setTimeout(r, 600));
+      window.scrollTo(0, 0);
+    });
+
+    const ignoreNames = ['全港分店', '港島區', '九龍區', '新界區', '列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '選擇分店', '分店列表'];
 
     const cardLocators = await page.locator('div, li, article, button').filter({ hasText: /店/ }).all();
     
@@ -31,10 +37,9 @@ const fs = require('fs');
       const text = await locator.innerText().catch(() => '');
       const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
       
-      // 🚨 FIX: Exact match against ignore list instead of substring match
       const name = lines.find(l => l.includes('店') && !ignoreNames.includes(l) && l.length < 25);
 
-      if (name && !seenNames.has(name) && (text.includes('組') || text.includes('分鐘'))) {
+      if (name && !seenNames.has(name)) {
         seenNames.add(name);
 
         const groupMatch = text.match(/(\d+)\s*組/);
@@ -59,7 +64,7 @@ const fs = require('fs');
       if (groups > 0) {
         try {
           await locator.click({ force: true, timeout: 1500 });
-          await page.waitForTimeout(300);
+          await page.waitForTimeout(350);
 
           const modalText = await page.evaluate((storeName) => {
             const elements = Array.from(document.querySelectorAll('aside, [role="dialog"], [class*="drawer"], [class*="modal"], [class*="panel"], [class*="popup"]'));
@@ -103,7 +108,7 @@ const fs = require('fs');
     };
 
     fs.writeFileSync('live_data.json', JSON.stringify(payload, null, 2));
-    console.log(`Saved clean data for ${outlets.length} stores to live_data.json`);
+    console.log(`Saved ${outlets.length} stores to live_data.json`);
 
   } catch (err) {
     console.error("Scraper Error:", err);
