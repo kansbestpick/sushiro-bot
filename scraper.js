@@ -1,7 +1,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 
-// 🎯 Official List of HK Sushiro Branches (Guarantees ZERO Garbage/UI Entries)
+// 🎯 Official List of HK Sushiro Branches
 const HK_STORES = [
   "黃埔享膳坊店", "黃埔時尚坊店", "佐敦薈店", "尖沙咀加連威老道店", "旺角店",
   "啟德零售館2店", "旺角東Moko店", "奧海城 2 期店", "九龍灣德福廣場2期店", "新蒲崗Mikiki店",
@@ -14,7 +14,7 @@ const HK_STORES = [
 ];
 
 (async () => {
-  console.log("Starting Sushiro Scraper (Store Whitelist Strategy)...");
+  console.log("Starting Sushiro Scraper (Card Container Locator Fix)...");
   
   const browser = await chromium.launch({
     headless: true,
@@ -27,10 +27,10 @@ const HK_STORES = [
     console.log("Loading Sushiro web app...");
     await page.goto('https://sushirolic.web.app/desktop.html', { waitUntil: 'networkidle', timeout: 60000 });
     
-    // Wait 5 seconds for live Firebase API data to load
-    await page.waitForTimeout(5000);
+    // Give Firebase 6 seconds to render live API data
+    await page.waitForTimeout(6000);
 
-    // Scroll page to force lazy-loaded cards into the DOM
+    // Scroll page to trigger lazy-loaded cards
     await page.evaluate(async () => {
       window.scrollTo(0, document.body.scrollHeight);
       await new Promise(r => setTimeout(r, 800));
@@ -44,8 +44,16 @@ const HK_STORES = [
       const storeName = HK_STORES[i];
       
       try {
-        // Target the specific element for this exact store name
-        const card = page.locator('div, li, button, article').filter({ hasText: storeName }).last();
+        // 🚨 CRITICAL FIX: Match the outer CARD container (must contain store name AND status text)
+        let card = page.locator('div, li, article, button')
+          .filter({ hasText: storeName })
+          .filter({ hasText: /組|分鐘|入座|叫號/ })
+          .first();
+
+        // Fallback to title element if combined filter doesn't match
+        if (await card.count() === 0) {
+          card = page.locator('div, li, article, button').filter({ hasText: storeName }).first();
+        }
         
         if (await card.count() > 0) {
           const cardText = await card.innerText().catch(() => '');
@@ -60,7 +68,7 @@ const HK_STORES = [
           if (groups > 0) {
             try {
               await card.click({ force: true, timeout: 1200 });
-              await page.waitForTimeout(300);
+              await page.waitForTimeout(350);
 
               const panelText = await page.evaluate(() => {
                 const elements = Array.from(document.querySelectorAll('div, section, aside, [class*="detail"], [class*="right"], [class*="drawer"]'));
@@ -79,7 +87,7 @@ const HK_STORES = [
                 });
               }
             } catch (e) {
-              // Fallback
+              // Keep fallback
             }
           }
 
