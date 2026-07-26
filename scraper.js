@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Sushiro Scraper (Extracting Tickets from Popup Only)...");
+  console.log("Starting Sushiro Scraper (Scoped Modal & Blacklist Fix)...");
   
   const browser = await chromium.launch({
     headless: true,
@@ -20,11 +20,12 @@ const fs = require('fs');
 
     const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎'];
 
-    // Find all store elements on the page
+    // 1. Locate all store cards on the page
     const cardLocators = await page.locator('div, li, article, button').filter({ hasText: /店/ }).all();
     
     const storeLocators = [];
     const seenNames = new Set();
+    const globalBlacklist = new Set(); // Collect all wait times & group counts across HK
 
     for (const locator of cardLocators) {
       const text = await locator.innerText().catch(() => '');
@@ -33,52 +34,54 @@ const fs = require('fs');
 
       if (name && !seenNames.has(name) && (text.includes('組') || text.includes('分鐘'))) {
         seenNames.add(name);
-        storeLocators.push({ locator, name, cardText: text });
+
+        const groupMatch = text.match(/(\d+)\s*組/);
+        const timeMatch = text.match(/(\d+)\s*分鐘/);
+        const groups = groupMatch ? parseInt(groupMatch[1], 10) : 0;
+        const waitTime = timeMatch ? parseInt(timeMatch[1], 10) : 0;
+
+        // Add group counts & wait times to global blacklist
+        if (groups > 0) globalBlacklist.add(groups);
+        if (waitTime > 0) globalBlacklist.add(waitTime);
+
+        storeLocators.push({ locator, name, groups, waitTime });
       }
     }
 
-    console.log(`Found ${storeLocators.length} valid store locations.`);
+    console.log(`Found ${storeLocators.length} stores. Global blacklist numbers:`, Array.from(globalBlacklist));
     const outlets = [];
 
     for (let i = 0; i < storeLocators.length; i++) {
-      const { locator, name, cardText } = storeLocators[i];
-
-      const groupMatch = cardText.match(/(\d+)\s*組/);
-      const timeMatch = cardText.match(/(\d+)\s*分鐘/);
-      const groups = groupMatch ? parseInt(groupMatch[1], 10) : 0;
-      const waitTime = timeMatch ? parseInt(timeMatch[1], 10) : 0;
-
+      const { locator, name, groups, waitTime } = storeLocators[i];
       let recentCalls = [];
 
       if (groups > 0) {
         try {
-          // Click to open the side popup drawer
-          await locator.click({ force: true, timeout: 1200 });
-          await page.waitForTimeout(400); // Wait for animation
+          // Click to open the drawer for THIS specific store
+          await locator.click({ force: true, timeout: 1500 });
+          await page.waitForTimeout(300);
 
-          // 🚨 CRITICAL FIX: Only extract text from the active popup, NOT the whole page!
-          const modalText = await page.evaluate(() => {
-            const drawers = document.querySelectorAll('aside, [role="dialog"], [class*="drawer"], [class*="modal"], [class*="panel"]');
-            if (drawers.length > 0) {
-              // Return the text of the most recently opened popup
-              return drawers[drawers.length - 1].innerText;
-            }
-            return ''; // If popup not found, return empty to prevent reading background addresses
-          });
+          // 🚨 SCOPED MODAL TARGETING: Only read the drawer that matches THIS store's name
+          const modalText = await page.evaluate((storeName) => {
+            const elements = Array.from(document.querySelectorAll('aside, [role="dialog"], [class*="drawer"], [class*="modal"], [class*="panel"], [class*="popup"]'));
+            const matchedModal = elements.find(el => el.innerText && el.innerText.includes(storeName));
+            return matchedModal ? matchedModal.innerText : '';
+          }, name);
 
-          // Match strict 3-digit numbers from the popup only
-          const rawMatches = modalText.match(/\b\d{3}\b/g) || [];
-          
-          recentCalls = [...new Set(rawMatches)].filter(num => {
-            const val = parseInt(num, 10);
-            return val >= 1 && val <= 999 && val !== groups && val !== waitTime;
-          });
+          if (modalText) {
+            // Extract 3-digit candidates from the verified store modal only
+            const rawMatches = modalText.match(/\b\d{3}\b/g) || [];
+            recentCalls = [...new Set(rawMatches)].filter(num => {
+              const val = parseInt(num, 10);
+              return val >= 1 && val <= 999 && !globalBlacklist.has(val);
+            });
+          }
         } catch (e) {
-          console.log(`Failed to read popup for ${name}`);
+          console.log(`Could not open modal for ${name}`);
         }
       }
 
-      // Safe Fallbacks
+      // Fallbacks
       if (groups === 0) {
         recentCalls = ['即時入座'];
       } else if (recentCalls.length === 0) {
@@ -103,10 +106,10 @@ const fs = require('fs');
     };
 
     fs.writeFileSync('live_data.json', JSON.stringify(payload, null, 2));
-    console.log(`Successfully saved data for ${outlets.length} stores to live_data.json`);
+    console.log(`Saved clean data for ${outlets.length} stores to live_data.json`);
 
   } catch (err) {
-    console.error("Scraper encountered an error:", err);
+    console.error("Scraper Error:", err);
   } finally {
     await browser.close();
   }
