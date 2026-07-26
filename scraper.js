@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Sushiro Scraper (With Auto-Scroll for Full Store List)...");
+  console.log("Starting Sushiro Scraper (Fixed Ticket Extraction & Full Store List)...");
   
   const browser = await chromium.launch({
     headless: true,
@@ -18,7 +18,7 @@ const fs = require('fs');
     await page.goto('https://sushirolic.web.app/desktop.html', { waitUntil: 'networkidle', timeout: 60000 });
     await page.waitForTimeout(4000);
 
-    // 📜 Auto-scroll to force lazy-loaded cards (like 九龍灣德福店) into the DOM
+    // 📜 Auto-scroll to trigger lazy-loaded stores into the DOM
     await page.evaluate(async () => {
       window.scrollTo(0, document.body.scrollHeight);
       await new Promise(r => setTimeout(r, 600));
@@ -27,16 +27,15 @@ const fs = require('fs');
 
     const ignoreNames = ['全港分店', '港島區', '九龍區', '新界區', '列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '選擇分店', '分店列表'];
 
+    // 1. Locate store cards on the left
     const cardLocators = await page.locator('div, li, article, button').filter({ hasText: /店/ }).all();
     
     const storeLocators = [];
     const seenNames = new Set();
-    const globalBlacklist = new Set();
 
     for (const locator of cardLocators) {
       const text = await locator.innerText().catch(() => '');
       const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
-      
       const name = lines.find(l => l.includes('店') && !ignoreNames.includes(l) && l.length < 25);
 
       if (name && !seenNames.has(name)) {
@@ -47,14 +46,11 @@ const fs = require('fs');
         const groups = groupMatch ? parseInt(groupMatch[1], 10) : 0;
         const waitTime = timeMatch ? parseInt(timeMatch[1], 10) : 0;
 
-        if (groups > 0) globalBlacklist.add(groups);
-        if (waitTime > 0) globalBlacklist.add(waitTime);
-
         storeLocators.push({ locator, name, groups, waitTime });
       }
     }
 
-    console.log(`Found ${storeLocators.length} stores.`);
+    console.log(`Found ${storeLocators.length} store locations.`);
     const outlets = [];
 
     for (let i = 0; i < storeLocators.length; i++) {
@@ -63,27 +59,39 @@ const fs = require('fs');
 
       if (groups > 0) {
         try {
+          // Click store card to update detail panel on the right
           await locator.click({ force: true, timeout: 1500 });
-          await page.waitForTimeout(350);
+          await page.waitForTimeout(400);
 
-          const modalText = await page.evaluate((storeName) => {
-            const elements = Array.from(document.querySelectorAll('aside, [role="dialog"], [class*="drawer"], [class*="modal"], [class*="panel"], [class*="popup"]'));
-            const matchedModal = elements.find(el => el.innerText && el.innerText.includes(storeName));
-            return matchedModal ? matchedModal.innerText : '';
-          }, name);
+          // 🎯 Target text ONLY from the right detail panel via geometry
+          const panelText = await page.evaluate(() => {
+            const elements = Array.from(document.querySelectorAll('div, section, aside, [class*="detail"], [class*="right"], [class*="drawer"]'));
+            
+            // Find container element positioned on the right half of the screen
+            const detailPanel = elements.find(el => {
+              const rect = el.getBoundingClientRect();
+              return rect.left > 300 && rect.width > 200 && el.innerText && el.innerText.length > 10;
+            });
 
-          if (modalText) {
-            const rawMatches = modalText.match(/\b\d{3}\b/g) || [];
-            recentCalls = [...new Set(rawMatches)].filter(num => {
-              const val = parseInt(num, 10);
-              return val >= 1 && val <= 999 && !globalBlacklist.has(val);
+            return detailPanel ? detailPanel.innerText : '';
+          });
+
+          if (panelText) {
+            // Extract 3-digit zero-padded ticket numbers (e.g. 012, 123, A104)
+            const rawMatches = panelText.match(/\b([A-Z]?\d{3})\b/gi) || [];
+            
+            recentCalls = [...new Set(rawMatches.map(m => m.toUpperCase()))].filter(num => {
+              const val = parseInt(num.replace(/\D/g, ''), 10);
+              // Filter out 000, out-of-bounds, and this store's group/time counts
+              return val >= 1 && val <= 999 && val !== groups && val !== waitTime;
             });
           }
         } catch (e) {
-          console.log(`Could not open modal for ${name}`);
+          console.log(`Could not read detail panel for ${name}`);
         }
       }
 
+      // Safe Fallbacks
       if (groups === 0) {
         recentCalls = ['即時入座'];
       } else if (recentCalls.length === 0) {
@@ -108,7 +116,7 @@ const fs = require('fs');
     };
 
     fs.writeFileSync('live_data.json', JSON.stringify(payload, null, 2));
-    console.log(`Saved ${outlets.length} stores to live_data.json`);
+    console.log(`Successfully saved ${outlets.length} stores to live_data.json`);
 
   } catch (err) {
     console.error("Scraper Error:", err);
