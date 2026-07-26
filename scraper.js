@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Playwright Native Scraper...");
+  console.log("Starting Playwright Scraper with strict ticket filtering...");
 
   const browser = await chromium.launch({
     headless: true,
@@ -16,19 +16,17 @@ const fs = require('fs');
   });
 
   try {
-    console.log("Navigating to target queue page...");
+    console.log("Navigating to queue page...");
     await page.goto('https://sushirolic.web.app/desktop.html', {
       waitUntil: 'networkidle',
       timeout: 60000
     });
 
-    // Wait 5 seconds for web app initialization
     await page.waitForTimeout(5000);
 
-    console.log("Finding store card elements...");
     const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '點選左邊分店'];
 
-    // Locate candidate elements containing store names
+    // Find all store card elements
     const allCards = await page.locator('div, li, button, article').filter({ hasText: /店/ }).all();
     
     const storeItems = [];
@@ -45,7 +43,7 @@ const fs = require('fs');
       }
     }
 
-    console.log(`Found ${storeItems.length} unique stores. Executing Playwright native clicks...`);
+    console.log(`Processing ${storeItems.length} stores...`);
 
     const outlets = [];
 
@@ -62,24 +60,32 @@ const fs = require('fs');
 
       if (groups > 0) {
         try {
-          // Playwright Native Click — forces Vue/React state updates
+          // Native click to open store detail view
           await item.locator.click({ force: true, timeout: 2000 });
-          await page.waitForTimeout(450); // wait for detail drawer render
+          await page.waitForTimeout(450);
 
-          // Read detail panel or whole page text
-          const pageText = await page.evaluate(() => document.body.innerText || '');
+          // Get raw text from the page
+          const rawPageText = await page.evaluate(() => document.body.innerText || '');
 
-          // Parse ticket numbers (e.g., A105, 233-239, G38, B012)
-          const ticketMatches = pageText.match(/([A-Za-z]?\s*\d{1,4}(?:\s*[-~至]\s*\d{1,4})?)/g) || [];
-          
-          const validTickets = ticketMatches
-            .map(t => t.replace(/\s+/g, '').toUpperCase())
-            .filter(t => t.length >= 2 && t !== String(groups) && t !== String(waitTime));
+          // ⚠️ KEY FIX: Strip out all wait times ("X 分鐘") and group counts ("X 組")
+          // so digits from wait times are never mistaken for ticket numbers!
+          const cleanedText = rawPageText
+            .replace(/\d+\s*分鐘/g, '')
+            .replace(/\d+\s*組/g, '')
+            .replace(/更新時間[^\n]*/g, '');
+
+          // Match authentic ticket patterns:
+          // 1) Prefix format: A123, B045, G38, C-012
+          // 2) Range format: 233-239, 176-177, 463-483
+          const matches = cleanedText.match(/([A-Z]\s*[-_]?\s*\d{1,4}|\b\d{2,4}\s*[-~至]\s*\d{2,4}\b)/gi) || [];
+
+          const validTickets = Array.from(new Set(
+            matches.map(t => t.replace(/\s+/g, '').toUpperCase())
+          )).filter(t => t.length >= 2);
 
           if (validTickets.length > 0) {
             callingNumber = validTickets[0];
-            // Store top 3 latest calling numbers for detail modal
-            recentCalls = Array.from(new Set(validTickets)).slice(0, 3);
+            recentCalls = validTickets.slice(0, 3);
           } else {
             callingNumber = '叫號中';
             recentCalls = ['叫號中'];
@@ -95,7 +101,7 @@ const fs = require('fs');
       outlets.push({
         id: i + 1,
         name_tc: item.name,
-        region: 'KLN', // Auto-mapped on Blogger frontend
+        region: 'KLN', // Region mapping handled on Blogger frontend
         current_number: callingNumber,
         recent_calls: recentCalls,
         waiting_groups: groups,
@@ -109,7 +115,7 @@ const fs = require('fs');
     };
 
     fs.writeFileSync('live_data.json', JSON.stringify(finalPayload, null, 2));
-    console.log(`Successfully generated live_data.json with ${outlets.length} stores!`);
+    console.log(`Successfully saved ${outlets.length} stores to live_data.json!`);
 
   } catch (err) {
     console.error("Scraper Error:", err.message);
