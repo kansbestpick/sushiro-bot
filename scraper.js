@@ -3,21 +3,20 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Playwright interactive scraper...");
+  console.log("Starting Playwright Native Scraper...");
 
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
 
-  const context = await browser.newContext({
+  const page = await browser.newPage({
+    viewport: { width: 1280, height: 800 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
   });
 
-  const page = await context.newPage();
-
   try {
-    console.log("Navigating to queue page...");
+    console.log("Navigating to target queue page...");
     await page.goto('https://sushirolic.web.app/desktop.html', {
       waitUntil: 'networkidle',
       timeout: 60000
@@ -26,116 +25,98 @@ const fs = require('fs');
     // Wait 5 seconds for web app initialization
     await page.waitForTimeout(5000);
 
-    console.log("Extracting live store list & triggering detail clicks...");
+    console.log("Finding store card elements...");
+    const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '點選左邊分店'];
 
-    const storesData = await page.evaluate(async () => {
-      const results = [];
-      const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '點選左邊分店'];
+    // Locate candidate elements containing store names
+    const allCards = await page.locator('div, li, button, article').filter({ hasText: /店/ }).all();
+    
+    const storeItems = [];
+    const seenNames = new Set();
 
-      // Find store card containers
-      const allElements = Array.from(document.querySelectorAll('div, li, button, article'));
-      const storeNodes = allElements.filter(el => {
-        const text = el.innerText || '';
-        const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
-        return lines.some(l => l.includes('店')) && 
-               (text.includes('組') || text.includes('分鐘')) && 
-               !ignoreNames.some(ign => text.startsWith(ign)) &&
-               el.children.length > 0 && el.children.length < 15;
-      });
+    for (const card of allCards) {
+      const text = await card.innerText().catch(() => '');
+      const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
+      const nameLine = lines.find(l => l.includes('店') && !ignoreNames.some(ign => l.includes(ign)) && l.length < 25);
 
-      // Deduplicate stores by branch name
-      const uniqueStores = [];
-      const seenNames = new Set();
-
-      for (const el of storeNodes) {
-        const text = el.innerText || '';
-        const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
-        const nameLine = lines.find(l => l.includes('店') && !ignoreNames.some(ign => l.includes(ign)) && l.length < 25);
-        
-        if (nameLine && !seenNames.has(nameLine)) {
-          seenNames.add(nameLine);
-          uniqueStores.push({ element: el, name: nameLine, text: text });
-        }
+      if (nameLine && !seenNames.has(nameLine) && (text.includes('組') || text.includes('分鐘'))) {
+        seenNames.add(nameLine);
+        storeItems.push({ locator: card, name: nameLine, text: text });
       }
+    }
 
-      // Helper: Dispatch full native mouse click
-      function triggerClick(el) {
-        const opts = { bubbles: true, cancelable: true, view: window };
-        el.dispatchEvent(new PointerEvent('pointerdown', opts));
-        el.dispatchEvent(new MouseEvent('mousedown', opts));
-        el.dispatchEvent(new PointerEvent('pointerup', opts));
-        el.dispatchEvent(new MouseEvent('mouseup', opts));
-        el.dispatchEvent(new MouseEvent('click', opts));
-      }
+    console.log(`Found ${storeItems.length} unique stores. Executing Playwright native clicks...`);
 
-      // Iterate through stores, click card, and parse right-side detail drawer
-      for (let i = 0; i < uniqueStores.length; i++) {
-        const item = uniqueStores[i];
-        const groupMatch = item.text.match(/(\d+)\s*組/);
-        const timeMatch = item.text.match(/(\d+)\s*分鐘/);
-        
-        const groups = groupMatch ? parseInt(groupMatch[1]) : 0;
-        const waitTime = timeMatch ? parseInt(timeMatch[1]) : 0;
+    const outlets = [];
 
-        let callingNumber = '即時入座';
+    for (let i = 0; i < storeItems.length; i++) {
+      const item = storeItems[i];
+      const groupMatch = item.text.match(/(\d+)\s*組/);
+      const timeMatch = item.text.match(/(\d+)\s*分鐘/);
 
-        if (groups > 0) {
-          try {
-            // Trigger native mouse event sequence on card
-            triggerClick(item.element);
-            
-            // Wait 450ms for detail drawer re-render
-            await new Promise(r => setTimeout(r, 450));
+      const groups = groupMatch ? parseInt(groupMatch[1]) : 0;
+      const waitTime = timeMatch ? parseInt(timeMatch[1]) : 0;
 
-            // Query right-side detail drawer or full page body
-            const detailPanel = document.querySelector('[class*="detail"], [class*="right"], [class*="drawer"], [class*="sidebar"]') || document.body;
-            const panelText = detailPanel.innerText || document.body.innerText || '';
+      let callingNumber = '即時入座';
+      let recentCalls = [];
 
-            // Extract ticket numbers (e.g. A045, 263-267, G38, 176-177)
-            const ticketMatch = panelText.match(/(?:現正叫號|叫號|堂食|籌號|叫至)[^\n]*?([A-Za-z]?\s*\d{1,4}(?:\s*[-~至]\s*\d{1,4})?)/i) ||
-                                panelText.match(/(\b[A-Za-z]?\d{1,4}\s*[-~至]\s*[A-Za-z]?\d{1,4}\b)/) ||
-                                panelText.match(/(\b[A-Za-z]\s*\d{2,4}\b)/);
+      if (groups > 0) {
+        try {
+          // Playwright Native Click — forces Vue/React state updates
+          await item.locator.click({ force: true, timeout: 2000 });
+          await page.waitForTimeout(450); // wait for detail drawer render
 
-            if (ticketMatch && ticketMatch[1]) {
-              callingNumber = ticketMatch[1].trim().replace(/\s+/g, '');
-            } else {
-              callingNumber = '叫號中';
-            }
-          } catch (err) {
+          // Read detail panel or whole page text
+          const pageText = await page.evaluate(() => document.body.innerText || '');
+
+          // Parse ticket numbers (e.g., A105, 233-239, G38, B012)
+          const ticketMatches = pageText.match(/([A-Za-z]?\s*\d{1,4}(?:\s*[-~至]\s*\d{1,4})?)/g) || [];
+          
+          const validTickets = ticketMatches
+            .map(t => t.replace(/\s+/g, '').toUpperCase())
+            .filter(t => t.length >= 2 && t !== String(groups) && t !== String(waitTime));
+
+          if (validTickets.length > 0) {
+            callingNumber = validTickets[0];
+            // Store top 3 latest calling numbers for detail modal
+            recentCalls = Array.from(new Set(validTickets)).slice(0, 3);
+          } else {
             callingNumber = '叫號中';
+            recentCalls = ['叫號中'];
           }
+        } catch (e) {
+          callingNumber = '叫號中';
+          recentCalls = ['叫號中'];
         }
-
-        results.push({
-          id: i + 1,
-          name_tc: item.name,
-          region: 'KLN', // Region auto-mapping is handled on Blogger frontend
-          current_number: callingNumber,
-          waiting_groups: groups,
-          wait_time: waitTime
-        });
+      } else {
+        recentCalls = ['即時入座'];
       }
 
-      return results;
-    });
-
-    console.log(`Successfully extracted ${storesData.length} stores!`);
+      outlets.push({
+        id: i + 1,
+        name_tc: item.name,
+        region: 'KLN', // Auto-mapped on Blogger frontend
+        current_number: callingNumber,
+        recent_calls: recentCalls,
+        waiting_groups: groups,
+        wait_time: waitTime
+      });
+    }
 
     const finalPayload = {
       updatedAt: new Date().toLocaleTimeString('zh-HK', { timeZone: 'Asia/Hong_Kong' }),
-      outlets: storesData
+      outlets: outlets
     };
 
     fs.writeFileSync('live_data.json', JSON.stringify(finalPayload, null, 2));
-    console.log("Successfully generated live_data.json!");
+    console.log(`Successfully generated live_data.json with ${outlets.length} stores!`);
 
   } catch (err) {
     console.error("Scraper Error:", err.message);
-    const fallbackPayload = {
+    fs.writeFileSync('live_data.json', JSON.stringify({
       updatedAt: new Date().toLocaleTimeString('zh-HK', { timeZone: 'Asia/Hong_Kong' }),
       outlets: []
-    };
-    fs.writeFileSync('live_data.json', JSON.stringify(fallbackPayload, null, 2));
+    }, null, 2));
   } finally {
     await browser.close();
   }
