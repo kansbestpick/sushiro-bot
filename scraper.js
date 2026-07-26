@@ -3,11 +3,15 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Sushiro Scraper (Clean Grid + Outlet Details)...");
+  console.log("Starting Sushiro Scraper (Extracting Recent 3 Numbers)...");
 
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled'
+    ]
   });
 
   const page = await browser.newPage({
@@ -43,7 +47,7 @@ const fs = require('fs');
       }
     }
 
-    console.log(`Extracting store details for ${storeItems.length} locations...`);
+    console.log(`Extracting details for ${storeItems.length} locations...`);
 
     const outlets = [];
 
@@ -57,9 +61,10 @@ const fs = require('fs');
 
       let address = '香港壽司郎分店';
       let callingNumber = groups === 0 ? '即時入座' : '叫號中';
+      let recentCalls = [];
 
       try {
-        // Native click to open store detail view
+        // Click store to open side detail panel
         await item.locator.click({ force: true, timeout: 2000 });
         await page.waitForTimeout(400);
 
@@ -68,33 +73,35 @@ const fs = require('fs');
           return panel.innerText || '';
         });
 
-        const lines = detailText.split('\n').map(s => s.trim()).filter(Boolean);
-
-        // Extract store address / shop unit line
-        const addrLine = lines.find(l => (l.includes('舖') || l.includes('樓') || l.includes('層') || l.includes('道') || l.includes('街') || l.includes('中心') || l.includes('廣場')) && !l.includes('等候') && !l.includes('分鐘') && !l.includes('組'));
-        if (addrLine && addrLine.length > 5) {
-          address = addrLine;
-        }
-
-        // Extract calling ticket if available in detail view
+        // 🎫 Extract ticket/calling numbers (e.g. A123, B045, 1024)
         if (groups > 0) {
-          const ticketMatch = detailText.match(/(?:現正叫號|叫號|堂食|籌號|叫至)[^\n]*?([A-Za-z]?\s*\d{1,4})/i);
-          if (ticketMatch && ticketMatch[1]) {
-            callingNumber = ticketMatch[1].trim();
+          const rawMatches = detailText.match(/[A-Za-z]?\s*\d{2,4}/gi) || [];
+          const filteredCalls = [...new Set(rawMatches.map(m => m.replace(/\s+/g, '').toUpperCase()))]
+            .filter(num => num != groups && num != waitTime && !num.includes('店'));
+
+          if (filteredCalls.length > 0) {
+            recentCalls = filteredCalls.slice(0, 3);
+            callingNumber = recentCalls[0];
           }
         }
       } catch (e) {
-        // Fallback safely
+        // Safe fallback
+      }
+
+      // Fallback defaults for recent_calls array
+      if (recentCalls.length === 0) {
+        recentCalls = groups === 0 ? ['即時入座'] : [callingNumber || '叫號中'];
       }
 
       outlets.push({
         id: i + 1,
         name_tc: item.name,
-        region: 'KLN', // Region mapping handled on Blogger frontend
+        region: 'KLN',
         waiting_groups: groups,
         wait_time: waitTime,
         address: address,
-        current_number: callingNumber
+        current_number: callingNumber,
+        recent_calls: recentCalls // 👈 Passed directly to JSON!
       });
     }
 
@@ -104,14 +111,10 @@ const fs = require('fs');
     };
 
     fs.writeFileSync('live_data.json', JSON.stringify(finalPayload, null, 2));
-    console.log(`Successfully generated live_data.json with ${outlets.length} stores!`);
+    console.log(`Successfully saved live_data.json with ${outlets.length} stores!`);
 
   } catch (err) {
     console.error("Scraper Error:", err.message);
-    fs.writeFileSync('live_data.json', JSON.stringify({
-      updatedAt: new Date().toLocaleTimeString('zh-HK', { timeZone: 'Asia/Hong_Kong' }),
-      outlets: []
-    }, null, 2));
   } finally {
     await browser.close();
   }
