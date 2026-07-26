@@ -1,16 +1,4 @@
 const ignoreNames = [
-  '全港分店', 
-  '港島區', 
-  '九龍區', 
-  '新界區', 
-  '列表', 
-  '九龍', 
-  '新界', 
-  '港島', 
-  '即時排隊', 
-  '壽司郎', 
-  '選擇分店', 
-  '分店列表', 
   '點選左邊分店' // 👈 Add this line to block the UI placeholder
 ];
 
