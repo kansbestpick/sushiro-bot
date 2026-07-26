@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Sushiro Scraper (Scoped Modal & Blacklist Fix)...");
+  console.log("Starting Sushiro Scraper (Including 九龍灣德福店 Fix)...");
   
   const browser = await chromium.launch({
     headless: true,
@@ -18,19 +18,21 @@ const fs = require('fs');
     await page.goto('https://sushirolic.web.app/desktop.html', { waitUntil: 'networkidle', timeout: 60000 });
     await page.waitForTimeout(4000);
 
-    const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎'];
+    // Exact names/labels to ignore (header titles/buttons)
+    const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '所有分店', '九龍區', '新界區', '港島區'];
 
-    // 1. Locate all store cards on the page
     const cardLocators = await page.locator('div, li, article, button').filter({ hasText: /店/ }).all();
     
     const storeLocators = [];
     const seenNames = new Set();
-    const globalBlacklist = new Set(); // Collect all wait times & group counts across HK
+    const globalBlacklist = new Set();
 
     for (const locator of cardLocators) {
       const text = await locator.innerText().catch(() => '');
       const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
-      const name = lines.find(l => l.includes('店') && !ignoreNames.some(ign => l.includes(ign)) && l.length < 25);
+      
+      // 🚨 FIX: Exact match against ignore list instead of substring match
+      const name = lines.find(l => l.includes('店') && !ignoreNames.includes(l) && l.length < 25);
 
       if (name && !seenNames.has(name) && (text.includes('組') || text.includes('分鐘'))) {
         seenNames.add(name);
@@ -40,7 +42,6 @@ const fs = require('fs');
         const groups = groupMatch ? parseInt(groupMatch[1], 10) : 0;
         const waitTime = timeMatch ? parseInt(timeMatch[1], 10) : 0;
 
-        // Add group counts & wait times to global blacklist
         if (groups > 0) globalBlacklist.add(groups);
         if (waitTime > 0) globalBlacklist.add(waitTime);
 
@@ -48,7 +49,7 @@ const fs = require('fs');
       }
     }
 
-    console.log(`Found ${storeLocators.length} stores. Global blacklist numbers:`, Array.from(globalBlacklist));
+    console.log(`Found ${storeLocators.length} stores.`);
     const outlets = [];
 
     for (let i = 0; i < storeLocators.length; i++) {
@@ -57,11 +58,9 @@ const fs = require('fs');
 
       if (groups > 0) {
         try {
-          // Click to open the drawer for THIS specific store
           await locator.click({ force: true, timeout: 1500 });
           await page.waitForTimeout(300);
 
-          // 🚨 SCOPED MODAL TARGETING: Only read the drawer that matches THIS store's name
           const modalText = await page.evaluate((storeName) => {
             const elements = Array.from(document.querySelectorAll('aside, [role="dialog"], [class*="drawer"], [class*="modal"], [class*="panel"], [class*="popup"]'));
             const matchedModal = elements.find(el => el.innerText && el.innerText.includes(storeName));
@@ -69,7 +68,6 @@ const fs = require('fs');
           }, name);
 
           if (modalText) {
-            // Extract 3-digit candidates from the verified store modal only
             const rawMatches = modalText.match(/\b\d{3}\b/g) || [];
             recentCalls = [...new Set(rawMatches)].filter(num => {
               const val = parseInt(num, 10);
@@ -81,7 +79,6 @@ const fs = require('fs');
         }
       }
 
-      // Fallbacks
       if (groups === 0) {
         recentCalls = ['即時入座'];
       } else if (recentCalls.length === 0) {
