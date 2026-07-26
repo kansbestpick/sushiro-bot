@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Playwright scraper...");
+  console.log("Starting Playwright interactive scraper...");
 
   const browser = await chromium.launch({
     headless: true,
@@ -15,113 +15,106 @@ const fs = require('fs');
   });
 
   const page = await context.newPage();
-  let queueData = null;
 
   try {
     console.log("Navigating to target queue page...");
     await page.goto('https://sushirolic.web.app/desktop.html', {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'networkidle',
       timeout: 60000
     });
 
-    // Wait 5 seconds for background dynamic scripts to render numbers
-    await page.waitForTimeout(5000);
+    // Wait for initial web app render
+    await page.waitForTimeout(4000);
 
-    console.log("Extracting exact ticket numbers from DOM...");
-    const outlets = await page.evaluate(() => {
+    console.log("Interactive extraction: clicking store cards for live ticket numbers...");
+
+    const storesData = await page.evaluate(async () => {
       const results = [];
-      const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎'];
-      
-      // Get sub-container elements containing store information
-      const allElements = Array.from(document.querySelectorAll('div, section, article, li'));
-      
-      const cardNodes = allElements.filter(el => {
-        const t = el.innerText || '';
-        const children = Array.from(el.querySelectorAll('div, section, article'));
-        const hasSubCards = children.some(c => (c.innerText || '').includes('店') && (c.innerText || '').includes('組'));
-        return t.includes('店') && (t.includes('組') || t.includes('分鐘') || t.includes('叫號')) && !hasSubCards;
+      const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '點選左邊分店'];
+
+      // Find all store card elements on the page
+      const elements = Array.from(document.querySelectorAll('div, li, button, a'));
+      const storeNodes = elements.filter(el => {
+        const text = el.innerText || '';
+        const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
+        return lines.some(l => l.includes('店')) && 
+               (text.includes('組') || text.includes('分鐘')) && 
+               !ignoreNames.some(ign => text.startsWith(ign)) &&
+               el.children.length > 0 && el.children.length < 15;
       });
 
-      cardNodes.forEach((card, index) => {
-        const rawText = card.innerText || '';
-        const lines = rawText.split('\n').map(s => s.trim()).filter(Boolean);
+      // Deduplicate elements by store name
+      const uniqueStores = [];
+      const seenNames = new Set();
+
+      for (const el of storeNodes) {
+        const text = el.innerText || '';
+        const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
+        const nameLine = lines.find(l => l.includes('店') && !ignoreNames.some(ign => l.includes(ign)) && l.length < 25);
         
-        // 1. Store Name
-        const nameLine = lines.find(l => l.includes('店') && !ignoreNames.some(ign => l.includes(ign)) && l.length < 25) || '';
-        if (!nameLine) return;
+        if (nameLine && !seenNames.has(nameLine)) {
+          seenNames.add(nameLine);
+          uniqueStores.push({ element: el, name: nameLine, text: text });
+        }
+      }
 
-        // 2. Waiting Groups
-        const groupMatch = rawText.match(/(\d+)\s*組/);
+      // Loop through each store card, click it, and read the right-side detail panel
+      for (let i = 0; i < uniqueStores.length; i++) {
+        const item = uniqueStores[i];
+        const groupMatch = item.text.match(/(\d+)\s*組/);
+        const timeMatch = item.text.match(/(\d+)\s*分鐘/);
+        
         const groups = groupMatch ? parseInt(groupMatch[1]) : 0;
-
-        // 3. Wait Time
-        const timeMatch = rawText.match(/(\d+)\s*分鐘/);
         const waitTime = timeMatch ? parseInt(timeMatch[1]) : 0;
 
-        // 4. Exact Ticket Number Extraction
-        let ticketNum = '';
+        let callingNumber = '即時入座';
 
-        // Strategy A: Find the line directly after "現正叫號" / "叫號"
-        const callIndex = lines.findIndex(l => l.includes('現正叫號') || l.includes('叫號'));
-        if (callIndex !== -1 && lines[callIndex + 1]) {
-          const candidate = lines[callIndex + 1];
-          if (!candidate.includes('組') && !candidate.includes('分') && !candidate.includes('等候') && candidate.length < 20) {
-            ticketNum = candidate;
-          }
-        }
+        if (groups > 0) {
+          try {
+            // Trigger click on store card to open right detail panel
+            item.element.click();
+            await new Promise(r => setTimeout(r, 300)); // wait for detail pane rendering
 
-        // Strategy B: Regex search for ticket patterns (e.g. A123, B045, 105, A-012)
-        if (!ticketNum || ticketNum === '叫號中') {
-          const ticketMatch = rawText.match(/([A-Z][-_\s]?\d{1,4}|\b\d{2,4}\b)/i);
-          if (ticketMatch) {
-            const matchedStr = ticketMatch[0].replace(/\s+/g, '').toUpperCase();
-            const numOnly = matchedStr.replace(/\D/g, '');
-            // Ensure matched number isn't the group count or wait time
-            if (numOnly !== String(groups) && numOnly !== String(waitTime)) {
-              ticketNum = matchedStr;
+            // Read the entire text including the newly updated detail panel
+            const bodyText = document.body.innerText || '';
+            
+            // Extract calling numbers from detail panel (matches A045, 263-267, etc.)
+            const ticketMatch = bodyText.match(/(?:現正叫號|叫號|堂食|籌號|叫至)[^\n]*?([A-Za-z]?\s*\d{2,4}(?:\s*[-~至]\s*\d{2,4})?)/i) ||
+                                bodyText.match(/(\b[A-Za-z]?\d{2,4}\s*[-~至]\s*[A-Za-z]?\d{2,4}\b)/) ||
+                                bodyText.match(/(\b[A-Za-z]\s*\d{2,4}\b)/);
+
+            if (ticketMatch && ticketMatch[1]) {
+              callingNumber = ticketMatch[1].trim();
+            } else {
+              callingNumber = '叫號中';
             }
+          } catch (err) {
+            callingNumber = '叫號中';
           }
-        }
-
-        // Final Fallback Assignment
-        if (!ticketNum || ticketNum === '叫號中') {
-          ticketNum = (groups === 0) ? '即時入座' : '叫號中';
         }
 
         results.push({
-          id: index + 1,
-          name_tc: nameLine,
-          region: 'KLN', // Region auto-mapping is handled on frontend
-          current_number: ticketNum,
+          id: i + 1,
+          name_tc: item.name,
+          region: 'KLN', // Region mapping handled on Blogger frontend
+          current_number: callingNumber,
           waiting_groups: groups,
           wait_time: waitTime
         });
-      });
+      }
 
-      // Deduplicate results by store name
-      const uniqueMap = new Map();
-      results.forEach(item => {
-        if (!uniqueMap.has(item.name_tc)) {
-          uniqueMap.set(item.name_tc, item);
-        }
-      });
-
-      return Array.from(uniqueMap.values());
+      return results;
     });
 
-    if (outlets.length > 0) {
-      queueData = { outlets };
-    } else {
-      queueData = { outlets: [] };
-    }
+    console.log(`Successfully extracted ${storesData.length} stores!`);
 
     const finalPayload = {
       updatedAt: new Date().toLocaleTimeString('zh-HK', { timeZone: 'Asia/Hong_Kong' }),
-      outlets: queueData.outlets
+      outlets: storesData
     };
 
     fs.writeFileSync('live_data.json', JSON.stringify(finalPayload, null, 2));
-    console.log(`Extracted ${queueData.outlets.length} stores to live_data.json`);
+    console.log("Successfully generated live_data.json with exact calling numbers!");
 
   } catch (err) {
     console.error("Scraper Error:", err.message);
