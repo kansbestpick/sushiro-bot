@@ -14,7 +14,7 @@ const HK_STORES = [
 ];
 
 (async () => {
-  console.log("Starting Sushiro Scraper (Card Container Locator Fix)...");
+  console.log("Starting Sushiro Scraper (Restored Store Whitelist Version)...");
   
   const browser = await chromium.launch({
     headless: true,
@@ -27,10 +27,10 @@ const HK_STORES = [
     console.log("Loading Sushiro web app...");
     await page.goto('https://sushirolic.web.app/desktop.html', { waitUntil: 'networkidle', timeout: 60000 });
     
-    // Give Firebase 6 seconds to render live API data
-    await page.waitForTimeout(6000);
+    // Wait 5 seconds for live Firebase API data to render
+    await page.waitForTimeout(5000);
 
-    // Scroll page to trigger lazy-loaded cards
+    // Scroll page to force lazy-loaded cards into the DOM
     await page.evaluate(async () => {
       window.scrollTo(0, document.body.scrollHeight);
       await new Promise(r => setTimeout(r, 800));
@@ -44,16 +44,8 @@ const HK_STORES = [
       const storeName = HK_STORES[i];
       
       try {
-        // 🚨 CRITICAL FIX: Match the outer CARD container (must contain store name AND status text)
-        let card = page.locator('div, li, article, button')
-          .filter({ hasText: storeName })
-          .filter({ hasText: /組|分鐘|入座|叫號/ })
-          .first();
-
-        // Fallback to title element if combined filter doesn't match
-        if (await card.count() === 0) {
-          card = page.locator('div, li, article, button').filter({ hasText: storeName }).first();
-        }
+        // 🚨 RESTORED: .last() correctly selects the full card container
+        const card = page.locator('div, li, button, article').filter({ hasText: storeName }).last();
         
         if (await card.count() > 0) {
           const cardText = await card.innerText().catch(() => '');
@@ -68,7 +60,7 @@ const HK_STORES = [
           if (groups > 0) {
             try {
               await card.click({ force: true, timeout: 1200 });
-              await page.waitForTimeout(350);
+              await page.waitForTimeout(300);
 
               const panelText = await page.evaluate(() => {
                 const elements = Array.from(document.querySelectorAll('div, section, aside, [class*="detail"], [class*="right"], [class*="drawer"]'));
@@ -87,7 +79,7 @@ const HK_STORES = [
                 });
               }
             } catch (e) {
-              // Keep fallback
+              // Safe fallback
             }
           }
 
