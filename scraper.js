@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Playwright Scraper with strict ticket filtering...");
+  console.log("Starting Playwright Scraper with pure numeric ticket support...");
 
   const browser = await chromium.launch({
     headless: true,
@@ -26,7 +26,7 @@ const fs = require('fs');
 
     const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '點選左邊分店'];
 
-    // Find all store card elements
+    // Locate store cards
     const allCards = await page.locator('div, li, button, article').filter({ hasText: /店/ }).all();
     
     const storeItems = [];
@@ -64,24 +64,26 @@ const fs = require('fs');
           await item.locator.click({ force: true, timeout: 2000 });
           await page.waitForTimeout(450);
 
-          // Get raw text from the page
           const rawPageText = await page.evaluate(() => document.body.innerText || '');
 
-          // ⚠️ KEY FIX: Strip out all wait times ("X 分鐘") and group counts ("X 組")
-          // so digits from wait times are never mistaken for ticket numbers!
-          const cleanedText = rawPageText
+          // 1. Remove address & shop unit lines (e.g., "350-351號舖", "Shop 176")
+          const linesWithoutAddress = rawPageText
+            .split('\n')
+            .filter(line => !/[舖Shop樓層地下地址電話營業]/i.test(line));
+
+          const cleanPageText = linesWithoutAddress.join('\n')
             .replace(/\d+\s*分鐘/g, '')
             .replace(/\d+\s*組/g, '')
             .replace(/更新時間[^\n]*/g, '');
 
-          // Match authentic ticket patterns:
-          // 1) Prefix format: A123, B045, G38, C-012
-          // 2) Range format: 233-239, 176-177, 463-483
-          const matches = cleanedText.match(/([A-Z]\s*[-_]?\s*\d{1,4}|\b\d{2,4}\s*[-~至]\s*\d{2,4}\b)/gi) || [];
+          // 2. Extract authentic ticket numbers/ranges (e.g., "263-267", "275", "105", "A101")
+          const matches = cleanPageText.match(/(?:現正叫號|叫號|堂食|籌號|叫至)[^\n]*?([A-Za-z]?\s*\d{1,4}(?:\s*[-~至]\s*\d{1,4})?)/gi) ||
+                          cleanPageText.match(/(\b[A-Za-z]?\d{1,4}\s*[-~至]\s*[A-Za-z]?\d{1,4}\b)/g) ||
+                          cleanPageText.match(/(\b[A-Za-z]?\d{2,4}\b)/g) || [];
 
           const validTickets = Array.from(new Set(
-            matches.map(t => t.replace(/\s+/g, '').toUpperCase())
-          )).filter(t => t.length >= 2);
+            matches.map(t => t.replace(/(?:現正叫號|叫號|堂食|籌號|叫至)/gi, '').trim().replace(/\s+/g, ''))
+          )).filter(t => t.length >= 1 && t !== String(groups) && t !== String(waitTime));
 
           if (validTickets.length > 0) {
             callingNumber = validTickets[0];
@@ -101,7 +103,7 @@ const fs = require('fs');
       outlets.push({
         id: i + 1,
         name_tc: item.name,
-        region: 'KLN', // Region mapping handled on Blogger frontend
+        region: 'KLN', // Auto-mapped on Blogger frontend
         current_number: callingNumber,
         recent_calls: recentCalls,
         waiting_groups: groups,
