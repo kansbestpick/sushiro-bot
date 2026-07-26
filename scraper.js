@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Sushiro Scraper (Extracting 3-digit tickets 001-999)...");
+  console.log("Starting Sushiro Scraper (Extracting Tickets from Popup Only)...");
   
   const browser = await chromium.launch({
     headless: true,
@@ -33,43 +33,52 @@ const fs = require('fs');
 
       if (name && !seenNames.has(name) && (text.includes('組') || text.includes('分鐘'))) {
         seenNames.add(name);
-        storeLocators.push({ locator, name });
+        storeLocators.push({ locator, name, cardText: text });
       }
     }
 
     console.log(`Found ${storeLocators.length} valid store locations.`);
-
     const outlets = [];
 
     for (let i = 0; i < storeLocators.length; i++) {
-      const { locator, name } = storeLocators[i];
-
-      let cardText = await locator.innerText().catch(() => '');
-
-      // Click card to open detail panel/drawer if present
-      try {
-        await locator.click({ force: true, timeout: 1200 });
-        await page.waitForTimeout(150);
-        const modalText = await page.evaluate(() => document.body.innerText || '');
-        cardText += '\n' + modalText;
-      } catch (e) {
-        // Fall back to card text if click fails
-      }
+      const { locator, name, cardText } = storeLocators[i];
 
       const groupMatch = cardText.match(/(\d+)\s*組/);
       const timeMatch = cardText.match(/(\d+)\s*分鐘/);
       const groups = groupMatch ? parseInt(groupMatch[1], 10) : 0;
       const waitTime = timeMatch ? parseInt(timeMatch[1], 10) : 0;
 
-      // 🎫 STRICT MATCH FOR 3-DIGIT TICKET NUMBERS (001 - 999)
-      const rawMatches = cardText.match(/\b\d{3}\b/g) || [];
-      
-      let recentCalls = [...new Set(rawMatches)].filter(num => {
-        const val = parseInt(num, 10);
-        // Ensure number is 001 - 999 and not mistakenly matching equal group/time values
-        return val >= 1 && val <= 999 && val !== groups && val !== waitTime;
-      });
+      let recentCalls = [];
 
+      if (groups > 0) {
+        try {
+          // Click to open the side popup drawer
+          await locator.click({ force: true, timeout: 1200 });
+          await page.waitForTimeout(400); // Wait for animation
+
+          // 🚨 CRITICAL FIX: Only extract text from the active popup, NOT the whole page!
+          const modalText = await page.evaluate(() => {
+            const drawers = document.querySelectorAll('aside, [role="dialog"], [class*="drawer"], [class*="modal"], [class*="panel"]');
+            if (drawers.length > 0) {
+              // Return the text of the most recently opened popup
+              return drawers[drawers.length - 1].innerText;
+            }
+            return ''; // If popup not found, return empty to prevent reading background addresses
+          });
+
+          // Match strict 3-digit numbers from the popup only
+          const rawMatches = modalText.match(/\b\d{3}\b/g) || [];
+          
+          recentCalls = [...new Set(rawMatches)].filter(num => {
+            const val = parseInt(num, 10);
+            return val >= 1 && val <= 999 && val !== groups && val !== waitTime;
+          });
+        } catch (e) {
+          console.log(`Failed to read popup for ${name}`);
+        }
+      }
+
+      // Safe Fallbacks
       if (groups === 0) {
         recentCalls = ['即時入座'];
       } else if (recentCalls.length === 0) {
@@ -83,7 +92,7 @@ const fs = require('fs');
         waiting_groups: groups,
         wait_time: waitTime,
         address: '香港壽司郎分店',
-        current_number: recentCalls[0] || (groups === 0 ? '即時入座' : '叫號中'),
+        current_number: recentCalls[0],
         recent_calls: recentCalls.slice(0, 3)
       });
     }
