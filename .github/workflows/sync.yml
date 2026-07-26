@@ -1,0 +1,32 @@
+name: Sync Sushiro Queues
+
+on:
+  schedule:
+    - cron: '*/2 * * * *' # Runs automatically every 2 minutes
+  workflow_dispatch: # Allows manual trigger for testing
+
+jobs:
+  fetch-and-store:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Live Sushiro Queue & Update Cloudflare KV
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          # 1. Fetch live numbers using mobile app client signatures
+          RAW_DATA=$(curl -s "https://hk.sushiroapp.com/api/v1/outlets" \
+            -H "User-Agent: SushiroHK/2.0.1 (iPhone; iOS 16.6)" \
+            -H "Accept: application/json" \
+            -H "X-Requested-With": "XMLHttpRequest")
+
+          # 2. Add timestamp
+          TIMESTAMP=$(date -u +"%T UTC")
+          JSON_PAYLOAD=$(jq -n --arg time "$TIMESTAMP" --argjson data "$RAW_DATA" '{updatedAt: $time, outlets: $data}')
+
+          # 3. Push payload directly into Cloudflare KV Storage
+          curl -X PUT "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$CF_KV_NAMESPACE_ID/values/sushiro_latest_data" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$JSON_PAYLOAD"
