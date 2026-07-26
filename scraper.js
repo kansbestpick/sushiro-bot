@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 (async () => {
-  console.log("Starting Playwright Scraper with pure numeric ticket support...");
+  console.log("Starting Sushiro Scraper (Clean Grid + Outlet Details)...");
 
   const browser = await chromium.launch({
     headless: true,
@@ -22,11 +22,11 @@ const fs = require('fs');
       timeout: 60000
     });
 
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(4000);
 
     const ignoreNames = ['列表', '九龍', '新界', '港島', '即時排隊', '壽司郎', '點選左邊分店'];
 
-    // Locate store cards
+    // Find all store card elements
     const allCards = await page.locator('div, li, button, article').filter({ hasText: /店/ }).all();
     
     const storeItems = [];
@@ -43,7 +43,7 @@ const fs = require('fs');
       }
     }
 
-    console.log(`Processing ${storeItems.length} stores...`);
+    console.log(`Extracting store details for ${storeItems.length} locations...`);
 
     const outlets = [];
 
@@ -55,59 +55,46 @@ const fs = require('fs');
       const groups = groupMatch ? parseInt(groupMatch[1]) : 0;
       const waitTime = timeMatch ? parseInt(timeMatch[1]) : 0;
 
-      let callingNumber = '即時入座';
-      let recentCalls = [];
+      let address = '香港壽司郎分店';
+      let callingNumber = groups === 0 ? '即時入座' : '叫號中';
 
-      if (groups > 0) {
-        try {
-          // Native click to open store detail view
-          await item.locator.click({ force: true, timeout: 2000 });
-          await page.waitForTimeout(450);
+      try {
+        // Native click to open store detail view
+        await item.locator.click({ force: true, timeout: 2000 });
+        await page.waitForTimeout(400);
 
-          const rawPageText = await page.evaluate(() => document.body.innerText || '');
+        const detailText = await page.evaluate(() => {
+          const panel = document.querySelector('[class*="detail"], [class*="right"], [class*="drawer"], [class*="sidebar"]') || document.body;
+          return panel.innerText || '';
+        });
 
-          // 1. Remove address & shop unit lines (e.g., "350-351號舖", "Shop 176")
-          const linesWithoutAddress = rawPageText
-            .split('\n')
-            .filter(line => !/[舖Shop樓層地下地址電話營業]/i.test(line));
+        const lines = detailText.split('\n').map(s => s.trim()).filter(Boolean);
 
-          const cleanPageText = linesWithoutAddress.join('\n')
-            .replace(/\d+\s*分鐘/g, '')
-            .replace(/\d+\s*組/g, '')
-            .replace(/更新時間[^\n]*/g, '');
-
-          // 2. Extract authentic ticket numbers/ranges (e.g., "263-267", "275", "105", "A101")
-          const matches = cleanPageText.match(/(?:現正叫號|叫號|堂食|籌號|叫至)[^\n]*?([A-Za-z]?\s*\d{1,4}(?:\s*[-~至]\s*\d{1,4})?)/gi) ||
-                          cleanPageText.match(/(\b[A-Za-z]?\d{1,4}\s*[-~至]\s*[A-Za-z]?\d{1,4}\b)/g) ||
-                          cleanPageText.match(/(\b[A-Za-z]?\d{2,4}\b)/g) || [];
-
-          const validTickets = Array.from(new Set(
-            matches.map(t => t.replace(/(?:現正叫號|叫號|堂食|籌號|叫至)/gi, '').trim().replace(/\s+/g, ''))
-          )).filter(t => t.length >= 1 && t !== String(groups) && t !== String(waitTime));
-
-          if (validTickets.length > 0) {
-            callingNumber = validTickets[0];
-            recentCalls = validTickets.slice(0, 3);
-          } else {
-            callingNumber = '叫號中';
-            recentCalls = ['叫號中'];
-          }
-        } catch (e) {
-          callingNumber = '叫號中';
-          recentCalls = ['叫號中'];
+        // Extract store address / shop unit line
+        const addrLine = lines.find(l => (l.includes('舖') || l.includes('樓') || l.includes('層') || l.includes('道') || l.includes('街') || l.includes('中心') || l.includes('廣場')) && !l.includes('等候') && !l.includes('分鐘') && !l.includes('組'));
+        if (addrLine && addrLine.length > 5) {
+          address = addrLine;
         }
-      } else {
-        recentCalls = ['即時入座'];
+
+        // Extract calling ticket if available in detail view
+        if (groups > 0) {
+          const ticketMatch = detailText.match(/(?:現正叫號|叫號|堂食|籌號|叫至)[^\n]*?([A-Za-z]?\s*\d{1,4})/i);
+          if (ticketMatch && ticketMatch[1]) {
+            callingNumber = ticketMatch[1].trim();
+          }
+        }
+      } catch (e) {
+        // Fallback safely
       }
 
       outlets.push({
         id: i + 1,
         name_tc: item.name,
-        region: 'KLN', // Auto-mapped on Blogger frontend
-        current_number: callingNumber,
-        recent_calls: recentCalls,
+        region: 'KLN', // Region mapping handled on Blogger frontend
         waiting_groups: groups,
-        wait_time: waitTime
+        wait_time: waitTime,
+        address: address,
+        current_number: callingNumber
       });
     }
 
@@ -117,7 +104,7 @@ const fs = require('fs');
     };
 
     fs.writeFileSync('live_data.json', JSON.stringify(finalPayload, null, 2));
-    console.log(`Successfully saved ${outlets.length} stores to live_data.json!`);
+    console.log(`Successfully generated live_data.json with ${outlets.length} stores!`);
 
   } catch (err) {
     console.error("Scraper Error:", err.message);
